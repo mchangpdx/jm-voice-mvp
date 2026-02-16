@@ -12,7 +12,7 @@ const apiClient = axios.create({
     }
 });
 
-// [Helper] 매장 ID 가져오기
+// [Helper 1] 매장 ID 가져오기
 async function getStoreId() {
     try {
         const response = await apiClient.get('/stores');
@@ -23,58 +23,71 @@ async function getStoreId() {
     }
 }
 
-// [Helper] 상품 이름으로 Variant ID 찾기 (핵심 수정됨)
+// [Helper 2] 상품 이름으로 Variant ID 찾기
 async function findVariantIdByItemName(targetName) {
     try {
         let cursor = null;
         do {
-            // /variants가 아니라 /items를 조회해야 상품명(item_name)이 보입니다.
             const url = cursor ? `/items?cursor=${cursor}` : '/items';
             const response = await apiClient.get(url);
-            
             const items = response.data.items || [];
             
-            // 대소문자 무시하고 이름 비교
             const foundItem = items.find(item => 
                 item.item_name.toLowerCase().trim() === targetName.toLowerCase().trim()
             );
 
-            if (foundItem) {
-                // 아이템을 찾았으면 첫 번째 옵션(Variant) ID를 반환
-                if (foundItem.variants && foundItem.variants.length > 0) {
-                    return foundItem.variants[0].variant_id;
-                }
+            if (foundItem && foundItem.variants.length > 0) {
+                return foundItem.variants[0].variant_id;
             }
-
             cursor = response.data.cursor;
         } while (cursor);
-
-        return null; // 끝까지 못 찾음
+        return null;
     } catch (error) {
         console.error(`[Loyverse] findVariantIdByItemName error: ${error.message}`);
         return null;
     }
 }
 
-// 2. 예약 영수증 생성
+// [Helper 3 - New!] 결제 수단 ID 가져오기 (이게 없어서 에러가 났었습니다)
+async function getPaymentTypeId() {
+    try {
+        const response = await apiClient.get('/payment_types');
+        const paymentTypes = response.data.payment_types;
+        
+        // 목록이 있으면 첫 번째 결제 수단(보통 Cash)의 ID를 반환
+        if (paymentTypes && paymentTypes.length > 0) {
+            return paymentTypes[0].id;
+        }
+        return null;
+    } catch (error) {
+        console.error('[Loyverse] Failed to fetch Payment Types:', error.message);
+        return null;
+    }
+}
+
+// 2. 예약 영수증 생성 (핵심 수정)
 async function createReservationReceipt(customerName, customerPhone, dateTime, partySize) {
     try {
+        // A. 필요한 정보들 수집 (매장 ID, 상품 ID, 결제수단 ID)
         const storeId = await getStoreId();
         if (!storeId) return { success: false, message: "Store ID not found." };
 
-        // 1단계: Reservation 상품의 ID 찾기
         const variantId = await findVariantIdByItemName('Reservation');
-        
         if (!variantId) {
-            console.error('[Loyverse] "Reservation" item not found. Please create it in Loyverse POS.');
+            console.error('[Loyverse] "Reservation" item not found.');
             return { success: false, message: "Reservation item missing in POS." };
         }
 
-        // 2단계: 영수증 생성
+        const paymentTypeId = await getPaymentTypeId();
+        if (!paymentTypeId) {
+            return { success: false, message: "No payment method found in Loyverse." };
+        }
+
+        // B. 영수증 데이터 구성 (결제 정보 완벽하게 추가)
         const payload = {
             receipt_type: "SALE",
             store_id: storeId,
-            total_money: 0, // 0원 명시
+            total_money: 0, 
             line_items: [
                 {
                     variant_id: variantId,
@@ -83,7 +96,13 @@ async function createReservationReceipt(customerName, customerPhone, dateTime, p
                     note: `Party: ${partySize}`
                 }
             ],
-            payments: [], // 빈 결제 정보
+            // [수정 포인트] 결제 정보를 빈 배열[]이 아니라 확실하게 채워서 보냄
+            payments: [
+                {
+                    payment_type_id: paymentTypeId,
+                    amount_money: 0
+                }
+            ],
             note: `[RESERVATION]\nName: ${customerName}\nPhone: ${customerPhone}\nTime: ${dateTime}\nPax: ${partySize}`
         };
 
@@ -97,13 +116,11 @@ async function createReservationReceipt(customerName, customerPhone, dateTime, p
         };
 
     } catch (error) {
+        // 에러 발생 시 상세 이유를 로그에 남김
         const errorDetail = error.response ? JSON.stringify(error.response.data) : error.message;
         console.error(`[Loyverse] Create Receipt Failed: ${errorDetail}`);
-        return { success: false, message: `Failed to create reservation: ${error.message}` };
+        return { success: false, message: `Failed to create reservation.` };
     }
 }
 
-// 함수 이름들을 외부에서 쓸 수 있게 내보냄
-// findItemPrice는 더 이상 안 쓰지만 호환성을 위해 남겨두거나 삭제 가능.
-// 여기서는 깔끔하게 필요한 것만 export 합니다.
-module.exports = { createReservationReceipt, findVariantIdByItemName };
+module.exports = { createReservationReceipt, findVariantIdByItemName, getPaymentTypeId };

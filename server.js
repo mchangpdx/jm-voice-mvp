@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const loyverse = require('./modules/loyverse');
 const stripe = require('./modules/stripe');
-const sms = require('./modules/sms'); // Import SMS module
+const sms = require('./modules/sms');
+const TinyURL = require('tinyurl'); // Import TinyURL
 
 const app = express();
 app.use(express.json());
@@ -15,33 +16,32 @@ app.post('/webhook/retell', async (req, res) => {
         console.log("Incoming Request:", JSON.stringify(req.body, null, 2));
 
         const { action } = req.body;
-        // Safely extract parameters
         const parameters = req.body.parameters || {};
 
         /* ============================================================
-           Scenario 1: Create Order & Send SMS
+           Scenario 1: Create Order & Send Short SMS
            ============================================================ */
         if (action === 'create_order') {
             const { item_name, customer_phone } = parameters;
-            const itemName = item_name || parameters.itemName; // Handle variable naming
+            const itemName = item_name || parameters.itemName;
 
             console.log(`[Order] Item: ${itemName}, Phone: ${customer_phone}`);
 
-            // 1. Check Price from Loyverse
+            // 1. Check Price (Loyverse)
             let item = null;
             if (loyverse.findItemPrice) {
                 item = await loyverse.findItemPrice(itemName);
             }
-            
-            // Fallback if item not found (for MVP testing)
+
+            // Fallback
             if (!item) {
                 if (itemName && itemName.toLowerCase().includes('pizza')) {
                      console.log("[Order] Item not found, using fallback price for Pizza.");
                      item = { name: "Pepperoni Pizza", price: 15.00 };
                 } else {
-                    return res.json({ 
-                        success: false, 
-                        message: `Sorry, I couldn't find '${itemName}' on the menu.` 
+                    return res.json({
+                        success: false,
+                        message: `Sorry, I couldn't find '${itemName}' on the menu.`
                     });
                 }
             }
@@ -49,26 +49,36 @@ app.post('/webhook/retell', async (req, res) => {
             const finalPrice = item.price;
             const finalItemName = item.name || itemName;
 
-            // 2. Generate Stripe Payment Link
-            const paymentLink = await stripe.createPaymentLink(finalItemName, finalPrice, customer_phone);
+            // 2. Generate Stripe Payment Link (Long URL)
+            const longLink = await stripe.createPaymentLink(finalItemName, finalPrice, customer_phone);
 
-            if (!paymentLink) {
+            if (!longLink) {
                 return res.json({ success: false, message: 'Failed to generate payment link.' });
             }
 
-            // 3. Send SMS with Payment Link (New Feature)
-            // (결제 링크가 포함된 문자 발송)
+            // 3. Shorten the Link (Fix for Twilio Error 30004)
+            // (긴 링크를 단축 URL로 변환)
+            let shortLink = longLink;
+            try {
+                shortLink = await TinyURL.shorten(longLink);
+                console.log(`[Link] Shortened: ${shortLink}`);
+            } catch (err) {
+                console.error("[Link] Shortener failed, using long link:", err);
+            }
+
+            // 4. Send SMS with Short Link
             if (customer_phone) {
-                const message = `[JM Pizza] Here is your order link for ${finalItemName} ($${finalPrice}): ${paymentLink}`;
+                // Keep message short!
+                const message = `[JM Pizza] Order: ${finalItemName} (${finalPrice}). Pay here: ${shortLink}`;
                 await sms.sendSMS(customer_phone, message);
             }
 
-            console.log(`[Order] Link Generated & SMS Sent: ${paymentLink}`);
-            
+            console.log(`[Order] Completed. Link: ${shortLink}`);
+
             return res.json({
                 success: true,
-                content: `I've sent a text message with the secure payment link for ${finalItemName}.`,
-                payment_link: paymentLink 
+                content: `I've sent a text with the payment link for ${finalItemName}.`,
+                payment_link: shortLink
             });
         }
 
@@ -80,7 +90,6 @@ app.post('/webhook/retell', async (req, res) => {
 
             console.log(`[Reservation] Request for ${customer_name} (${party_size} ppl) at ${date_time}`);
 
-            // 1. Create Receipt in Loyverse
             const result = await loyverse.createReservationReceipt(
                 customer_name,
                 customer_phone,
@@ -88,29 +97,24 @@ app.post('/webhook/retell', async (req, res) => {
                 party_size
             );
 
-            // 2. Handle Success/Failure
             if (!result.success) {
                 console.error(`[Reservation] Failed: ${result.message}`);
-                return res.json({ 
-                    success: false, 
-                    message: "I'm sorry, I couldn't access the reservation system right now." 
+                return res.json({
+                    success: false,
+                    message: "I'm sorry, I couldn't access the reservation system right now."
                 });
             }
 
             console.log(`[Reservation] Success! Receipt #: ${result.receipt_number}`);
 
-            return res.json({ 
-                success: true, 
+            return res.json({
+                success: true,
                 message: `Reservation confirmed for ${party_size} people. Confirmation number is ${result.receipt_number}.`,
-                receipt_number: result.receipt_number 
+                receipt_number: result.receipt_number
             });
         }
 
-        /* ============================================================
-           Unknown Action
-           ============================================================ */
         else {
-            console.log(`[Unknown Action] ${action}`);
             return res.json({ success: false, message: `Unknown action: ${action}` });
         }
 

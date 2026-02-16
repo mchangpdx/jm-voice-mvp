@@ -10,7 +10,7 @@ app.post('/webhook/retell', async (req, res) => {
   const { action } = req.body;
 
   if (action === 'create_order') {
-    const { item_name, customer_phone } = req.body;
+    const { item_name, customer_phone } = req.body.parameters;
 
     const item = await loyverse.findItemPrice(item_name);
     if (!item) {
@@ -25,7 +25,7 @@ app.post('/webhook/retell', async (req, res) => {
     return res.json({ success: true, payment_link: paymentLink });
 
   } else if (action === 'book_reservation') {
-    const { customer_name, customer_phone, date_time, party_size } = req.body;
+    const { customer_name, customer_phone, date_time, party_size } = req.body.parameters;
 
     const receiptNumber = await loyverse.createReservationReceipt(
       customer_name,

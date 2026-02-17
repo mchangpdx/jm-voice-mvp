@@ -12,7 +12,6 @@ const apiClient = axios.create({
     }
 });
 
-// Cache Store ID to avoid repeated calls
 let cachedStoreId = null;
 
 async function getStoreId() {
@@ -42,9 +41,6 @@ async function getPaymentTypeId() {
     }
 }
 
-/**
- * Find Item Price (Store-Specific Logic)
- */
 async function findItemPrice(itemName) {
     try {
         const storeId = await getStoreId();
@@ -56,7 +52,6 @@ async function findItemPrice(itemName) {
             const response = await apiClient.get(url);
             const items = response.data.items || [];
 
-            // Fuzzy match name (case-insensitive)
             const foundItem = items.find(item =>
                 item.item_name.toLowerCase().includes(itemName.toLowerCase())
             );
@@ -64,28 +59,15 @@ async function findItemPrice(itemName) {
             if (foundItem) {
                 if (foundItem.variants && foundItem.variants.length > 0) {
                     const variant = foundItem.variants[0];
-
-                    // [Critical Fix] Find price for the specific store
                     let finalPrice = undefined;
 
                     if (variant.stores && storeId) {
                         const storeData = variant.stores.find(s => s.store_id === storeId);
-                        if (storeData) {
-                            finalPrice = storeData.price;
-                        }
+                        if (storeData) finalPrice = storeData.price;
                     }
+                    if (finalPrice === undefined) finalPrice = variant.default_price;
+                    if (finalPrice === undefined) finalPrice = variant.price;
 
-                    // Fallback to default_price if store price is missing
-                    if (finalPrice === undefined || finalPrice === null) {
-                        finalPrice = variant.default_price;
-                    }
-
-                    // Fallback to variant.price (rare case)
-                    if (finalPrice === undefined || finalPrice === null) {
-                        finalPrice = variant.price;
-                    }
-
-                    // Ensure it's a number
                     finalPrice = Number(finalPrice);
 
                     console.log(`[Loyverse] Found: ${foundItem.item_name} (Price: ${finalPrice})`);
@@ -108,47 +90,43 @@ async function findItemPrice(itemName) {
     }
 }
 
-async function createReservationReceipt(customerName, customerPhone, dateTime, partySize) {
+// [Fix] Generic function to create a receipt (for both Orders and Reservations)
+async function createReceipt(itemDetails, customerInfo, note = "") {
     try {
         const storeId = await getStoreId();
-        if (!storeId) return { success: false, message: "Store ID not found." };
-
-        const reservationItem = await findItemPrice('Reservation');
-        if (!reservationItem) {
-            return { success: false, message: "Reservation item missing in POS." };
-        }
-
         const paymentTypeId = await getPaymentTypeId();
-        if (!paymentTypeId) return { success: false, message: "No payment method found." };
+
+        if (!storeId || !paymentTypeId) return { success: false, message: "Missing Store/Payment ID" };
 
         const payload = {
             receipt_type: "SALE",
             store_id: storeId,
-            total_money: 0,
+            total_money: itemDetails.price, // For orders, this is real price. For reservations, likely 0.
             line_items: [{
-                variant_id: reservationItem.variant_id,
+                variant_id: itemDetails.variant_id,
                 quantity: 1,
-                price: 0,
-                note: `Party: ${partySize}`
+                price: itemDetails.price,
+                note: note
             }],
             payments: [{
                 payment_type_id: paymentTypeId,
-                amount_money: 0
+                amount_money: itemDetails.price
             }],
-            note: `[RESERVATION]\nName: ${customerName}\nPhone: ${customerPhone}\nTime: ${dateTime}\nPax: ${partySize}`
+            note: note
         };
 
         const response = await apiClient.post('/receipts', payload);
+        console.log(`[Loyverse] Receipt Created: ${response.data.receipt_number}`);
+
         return {
             success: true,
-            message: 'Reservation confirmed.',
             receipt_number: response.data.receipt_number
         };
+
     } catch (error) {
-        const errorDetail = error.response ? JSON.stringify(error.response.data) : error.message;
-        console.error(`[Loyverse] Create Receipt Failed: ${errorDetail}`);
-        return { success: false, message: `Failed to create reservation.` };
+        console.error(`[Loyverse] Create Receipt Failed: ${error.message}`);
+        return { success: false, message: error.message };
     }
 }
 
-module.exports = { findItemPrice, createReservationReceipt };
+module.exports = { findItemPrice, createReceipt };

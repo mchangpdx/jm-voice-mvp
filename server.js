@@ -15,13 +15,13 @@ app.post('/webhook/retell', async (req, res) => {
 
         // [Fix] Handle both manual Curl (action/parameters) and Retell (name/args)
         const body = req.body;
-        const action = body.action || body.name; // Retell uses 'name'
-        const parameters = body.parameters || body.args || {}; // Retell uses 'args'
+        const action = body.action || body.name;
+        const parameters = body.parameters || body.args || {};
 
         console.log(`[Processing] Action: ${action}, Params: ${JSON.stringify(parameters)}`);
 
         /* ============================================================
-           Scenario 1: Create Order (Hybrid: SMS + Email)
+           Scenario 1: Create Order (Hybrid: SMS + Email + Loyverse Receipt)
            ============================================================ */
         if (action === 'create_order') {
             const { item_name, customer_phone, customer_email } = parameters;
@@ -30,12 +30,8 @@ app.post('/webhook/retell', async (req, res) => {
             console.log(`[Order] Item: ${itemName}, Phone: ${customer_phone}, Email: ${customer_email}`);
 
             // 1. Check Price from Loyverse
-            let item = null;
-            if (loyverse.findItemPrice) {
-                item = await loyverse.findItemPrice(itemName);
-            }
+            const item = await loyverse.findItemPrice(itemName);
 
-            // Strict Check: If item not found, return error
             if (!item) {
                 console.log(`[Order] Error: Item '${itemName}' not found in Loyverse.`);
                 return res.json({
@@ -56,24 +52,33 @@ app.post('/webhook/retell', async (req, res) => {
                  });
             }
 
-            // 2. Generate Stripe Payment Link
+            // 2. Create Receipt in Loyverse (Fix: Orders now appear in POS)
+            const orderNote = `[ORDER] ${finalItemName} - Phone: ${customer_phone || 'N/A'}`;
+            const receiptResult = await loyverse.createReceipt(item, { phone: customer_phone }, orderNote);
+            if (receiptResult.success) {
+                console.log(`[Order] Loyverse Receipt: ${receiptResult.receipt_number}`);
+            } else {
+                console.error(`[Order] Loyverse Receipt failed: ${receiptResult.message}`);
+            }
+
+            // 3. Generate Stripe Payment Link
             const longLink = await stripe.createPaymentLink(finalItemName, finalPrice, customer_phone);
             if (!longLink) {
                 return res.json({ success: false, message: 'Failed to generate payment link.' });
             }
 
-            // 3. Shorten Link
+            // 4. Shorten Link
             let shortLink = longLink;
             try { shortLink = await TinyURL.shorten(longLink); } catch (e) {
                 console.error("[TinyURL] Failed, using long link");
             }
 
-            // 4. Send Notifications (Hybrid)
+            // 5. Send Notifications (Hybrid)
             let sentChannels = [];
 
             // A. Try SMS (Fail-safe)
             if (customer_phone) {
-                const smsMsg = `[JM Pizza] Order: ${finalItemName} (${finalPrice}). Pay here: ${shortLink}`;
+                const smsMsg = `[JM Cafe] Order: ${finalItemName} ($${finalPrice}). Pay here: ${shortLink}`;
                 const smsResult = await sms.sendSMS(customer_phone, smsMsg);
                 if (smsResult) sentChannels.push("SMS");
                 else console.log("[Order] SMS failed, trying email...");
@@ -83,12 +88,11 @@ app.post('/webhook/retell', async (req, res) => {
             if (customer_email) {
                 const emailSubject = `Payment Link for your ${finalItemName}`;
                 const emailHtml = `
-                    <h2>Order Confirmation - JM Pizza</h2>
+                    <h2>Order Confirmation - JM Cafe</h2>
                     <p>You ordered: <b>${finalItemName}</b></p>
-                    <p>Price: <b>${finalPrice}</b></p>
+                    <p>Price: <b>$${finalPrice}</b></p>
                     <p>Click the link below to pay securely:</p>
                     <p><a href="${shortLink}" style="background-color:#4CAF50; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;">Pay Now</a></p>
-                    <p>Or verify receipt number later.</p>
                 `;
                 const emailResult = await email.sendEmail(customer_email, emailSubject, emailHtml);
                 if (emailResult) sentChannels.push("Email");
@@ -98,33 +102,40 @@ app.post('/webhook/retell', async (req, res) => {
                 ? `I've sent the payment link via ${sentChannels.join(' and ')}.`
                 : "I couldn't send the notification, but the order link is generated.";
 
-            // Return success to Retell
             return res.json({
                 success: true,
                 content: responseMsg,
-                payment_link: shortLink
+                payment_link: shortLink,
+                receipt_number: receiptResult.success ? receiptResult.receipt_number : null
             });
         }
 
         /* ============================================================
-           Scenario 2: Book Reservation (Now with Email)
+           Scenario 2: Book Reservation (with Email)
            ============================================================ */
         else if (action === 'book_reservation') {
-            // [Update] Extract customer_email
             const { customer_name, customer_phone, customer_email, date_time, party_size } = parameters;
 
             console.log(`[Reservation] Name: ${customer_name}, Email: ${customer_email}, Time: ${date_time}`);
 
-            // 1. Create Receipt in Loyverse
-            const result = await loyverse.createReservationReceipt(customer_name, customer_phone, date_time, party_size);
+            // 1. Find the "Reservation" item in Loyverse
+            const reservationItem = await loyverse.findItemPrice('Reservation');
+            if (!reservationItem) {
+                return res.json({ success: false, message: "Reservation item missing in POS." });
+            }
+
+            // 2. Create Receipt with $0 price
+            const reservationNote = `[RESERVATION]\nName: ${customer_name}\nPhone: ${customer_phone}\nTime: ${date_time}\nPax: ${party_size}`;
+            const reservationDetails = { ...reservationItem, price: 0 }; // Override price to 0
+            const result = await loyverse.createReceipt(reservationDetails, { name: customer_name, phone: customer_phone }, reservationNote);
 
             if (!result.success) {
                 return res.json({ success: false, message: "I'm sorry, I couldn't access the reservation system right now." });
             }
 
-            // 2. Send Confirmation Email (New Feature)
+            // 3. Send Confirmation Email
             if (customer_email) {
-                const emailSubject = `Reservation Confirmed - JM Pizza`;
+                const emailSubject = `Reservation Confirmed - JM Cafe`;
                 const emailHtml = `
                     <h2>Reservation Confirmed!</h2>
                     <p>Dear <b>${customer_name}</b>,</p>
@@ -134,9 +145,8 @@ app.post('/webhook/retell', async (req, res) => {
                         <li><b>Party Size:</b> ${party_size} people</li>
                         <li><b>Confirmation #:</b> ${result.receipt_number}</li>
                     </ul>
-                    <p>See you soon at JM Pizza!</p>
+                    <p>See you soon at JM Cafe!</p>
                 `;
-                // Send email but don't block the response if it fails
                 email.sendEmail(customer_email, emailSubject, emailHtml).catch(err => console.error("Email failed:", err));
             }
 

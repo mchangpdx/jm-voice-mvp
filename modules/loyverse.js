@@ -132,4 +132,45 @@ async function createReceipt(lineItems, note = "") {
     }
 }
 
-module.exports = { findItemPrice, createReceipt };
+// Fetch all menu items (for dashboard & Retell KB sync)
+async function getFullMenu() {
+    try {
+        const storeId = await getStoreId();
+        let cursor = null;
+        const allItems = [];
+
+        do {
+            const url = cursor ? `/items?cursor=${cursor}` : '/items';
+            const response = await apiClient.get(url);
+            const items = response.data.items || [];
+
+            for (const item of items) {
+                if (item.variants && item.variants.length > 0) {
+                    const variant = item.variants[0];
+                    let finalPrice = undefined;
+
+                    if (variant.stores && storeId) {
+                        const storeData = variant.stores.find(s => s.store_id === storeId);
+                        if (storeData) finalPrice = storeData.price;
+                    }
+                    if (finalPrice === undefined) finalPrice = variant.default_price;
+                    if (finalPrice === undefined) finalPrice = variant.price;
+
+                    allItems.push({
+                        name: item.item_name,
+                        price: Number(finalPrice)
+                    });
+                }
+            }
+            cursor = response.data.cursor;
+        } while (cursor);
+
+        console.log(`[Loyverse] Fetched ${allItems.length} menu items.`);
+        return allItems;
+    } catch (error) {
+        console.error(`[Loyverse] getFullMenu error: ${error.message}`);
+        return [];
+    }
+}
+
+module.exports = { findItemPrice, createReceipt, getFullMenu };

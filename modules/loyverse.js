@@ -37,8 +37,7 @@ async function getPaymentTypeId() {
 }
 
 /**
- * Find Item Price & Details by Name (Robust Version)
- * (상품 이름으로 가격 및 정보 찾기 - 페이지네이션 및 부분 일치 적용)
+ * Find Item Price & Details (Fixed Price Logic)
  */
 async function findItemPrice(itemName) {
     try {
@@ -50,7 +49,6 @@ async function findItemPrice(itemName) {
             const response = await apiClient.get(url);
             const items = response.data.items || [];
 
-            // Fuzzy match: check if item name contains the search term (case-insensitive)
             const foundItem = items.find(item =>
                 item.item_name.toLowerCase().includes(itemName.toLowerCase())
             );
@@ -58,10 +56,22 @@ async function findItemPrice(itemName) {
             if (foundItem) {
                 if (foundItem.variants && foundItem.variants.length > 0) {
                     const variant = foundItem.variants[0];
-                    console.log(`[Loyverse] Found: ${foundItem.item_name} (${variant.price})`);
+
+                    // [Fix] Check both 'price' and 'default_price'
+                    let finalPrice = variant.price;
+                    if (finalPrice === undefined || finalPrice === null) {
+                        finalPrice = variant.default_price;
+                    }
+                    // Safety fallback
+                    if (finalPrice === undefined || finalPrice === null) {
+                        finalPrice = 0;
+                    }
+
+                    console.log(`[Loyverse] Found: ${foundItem.item_name} (Price: ${finalPrice})`);
+
                     return {
                         name: foundItem.item_name,
-                        price: variant.price,
+                        price: Number(finalPrice), // Ensure it is a Number
                         variant_id: variant.variant_id
                     };
                 }
@@ -69,7 +79,7 @@ async function findItemPrice(itemName) {
             cursor = response.data.cursor;
         } while (cursor);
 
-        console.log(`[Loyverse] Item "${itemName}" not found in catalog.`);
+        console.log(`[Loyverse] Item "${itemName}" not found.`);
         return null;
     } catch (error) {
         console.error(`[Loyverse] findItemPrice error: ${error.message}`);

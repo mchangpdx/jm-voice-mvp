@@ -1,4 +1,4 @@
-/* modules/retell.js - Fixed & Debug Mode */
+/* modules/retell.js - Fixed Endpoint */
 const axios = require('axios');
 require('dotenv').config();
 
@@ -13,11 +13,11 @@ const headers = {
 // 1. Get KB Info
 async function getKnowledgeBase(kbId) {
     try {
-        console.log(`[Retell] Fetching KB Info for ID: ${kbId}`);
+        // console.log(`[Retell] Fetching KB Info: ${kbId}`);
         const response = await axios.get(`${RETELL_API_URL}/get-knowledge-base/${kbId}`, { headers });
         return response.data;
     } catch (error) {
-        logError('Get KB', error);
+        console.error(`[Retell] Get KB Error: ${error.message}`);
         throw error;
     }
 }
@@ -28,17 +28,15 @@ async function deleteSource(kbId, sourceId) {
         console.log(`[Retell] Deleting old source: ${sourceId}`);
         await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${kbId}/${sourceId}`, { headers });
     } catch (error) {
-        logError('Delete Source', error);
-        // Don't throw here, just log it. It's okay if deletion fails.
+        console.error(`[Retell] Delete Source Error: ${error.message}`);
     }
 }
 
-// 3. Add Text Source (Corrected Endpoint)
+// 3. Add Text Source (Corrected: PLURAL Endpoint)
 async function addTextSource(kbId, title, text) {
     try {
+        // Correct Payload Structure for the plural endpoint
         const payload = {
-            knowledge_base_id: kbId,
-            knowledge_base_source_type: "text", // Explicitly set type
             knowledge_base_texts: [
                 {
                     title: title,
@@ -49,26 +47,23 @@ async function addTextSource(kbId, title, text) {
 
         console.log(`[Retell] Adding new source to ${kbId}...`);
 
-        // Try the standard endpoint based on recent docs patterns
-        // Note: Retell API endpoints vary. Using the specific "add" endpoint.
-        const response = await axios.post(`${RETELL_API_URL}/add-knowledge-base-source`, payload, { headers });
+        // [FIX] Use the correct plural endpoint with ID in the URL
+        const response = await axios.post(
+            `${RETELL_API_URL}/add-knowledge-base-sources/${kbId}`,
+            payload,
+            { headers }
+        );
 
-        console.log(`[Retell] Success! Source added. ID: ${response.data.knowledge_base_source_id}`);
+        console.log(`[Retell] Success! Source added.`);
         return response.data;
     } catch (error) {
-        logError('Add Source', error);
+        if (error.response) {
+            console.error(`[Retell Error] Status: ${error.response.status}`);
+            console.error(`[Retell Error] Data:`, JSON.stringify(error.response.data, null, 2));
+        } else {
+            console.error(`[Retell Error] ${error.message}`);
+        }
         throw error;
-    }
-}
-
-// Helper: Better Error Logger
-function logError(context, error) {
-    if (error.response) {
-        // The request was made and the server responded with a status code
-        console.error(`[Retell Error - ${context}] Status: ${error.response.status}`);
-        console.error(`[Retell Error - ${context}] Data:`, JSON.stringify(error.response.data, null, 2));
-    } else {
-        console.error(`[Retell Error - ${context}] Message: ${error.message}`);
     }
 }
 
@@ -76,10 +71,10 @@ function logError(context, error) {
 async function updateMenuInKB(kbId, menuText) {
     console.log('[Retell] Starting Update Process...');
 
-    // 1. Check if KB exists
+    // 1. Check current KB
     const kbData = await getKnowledgeBase(kbId);
 
-    // 2. Clean up old "Daily Menu" sources
+    // 2. Clean up old "Daily Menu"
     if (kbData.knowledge_base_sources) {
         for (const source of kbData.knowledge_base_sources) {
             if (source.filename === "Daily Menu" || source.title === "Daily Menu") {

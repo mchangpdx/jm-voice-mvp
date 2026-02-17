@@ -1,18 +1,17 @@
-/* modules/retell.js - Official SDK Version */
+/* modules/retell.js - Fixed SDK Payload */
 const Retell = require('retell-sdk');
 require('dotenv').config();
 
 const API_KEY = process.env.RETELL_API_KEY;
 
-// Initialize SDK Client
+// Initialize SDK
 const client = new Retell({
     apiKey: API_KEY,
 });
 
-// 1. Get KB Info (Retrieve)
+// 1. Get KB Info
 async function getKnowledgeBase(kbId) {
     try {
-        // console.log(`[Retell SDK] Fetching KB: ${kbId}`);
         const response = await client.knowledgeBase.retrieve(kbId);
         return response;
     } catch (error) {
@@ -31,7 +30,7 @@ async function deleteSource(kbId, sourceId) {
     }
 }
 
-// 3. Add Text Source (Using SDK)
+// 3. Add Text Source (FIXED KEY)
 async function addTextSource(kbId, menuText) {
     try {
         const now = new Date();
@@ -40,10 +39,11 @@ async function addTextSource(kbId, menuText) {
 
         console.log(`[Retell SDK] Adding source: "${uniqueTitle}"`);
 
-        // SDK handles the multipart/form-data complexity automatically
+        // [CRITICAL FIX] Use 'knowledge_base_sources' key with 'type: "text"'
         const response = await client.knowledgeBase.addSources(kbId, {
-            knowledge_base_texts: [
+            knowledge_base_sources: [
                 {
+                    type: "text", // Required
                     title: uniqueTitle,
                     text: menuText
                 }
@@ -58,14 +58,14 @@ async function addTextSource(kbId, menuText) {
     }
 }
 
-// Main Logic (Smart Update)
+// Main Logic
 async function updateMenuInKB(kbId, menuText) {
     console.log('[Retell SDK] Starting Menu Update...');
 
     // A. Fetch Current Sources
     const kbData = await getKnowledgeBase(kbId);
 
-    // B. Smart Delete: Only delete items with "Daily Menu" in title
+    // B. Smart Delete
     if (kbData.knowledge_base_sources) {
         const oldMenus = kbData.knowledge_base_sources.filter(source =>
             source.title && source.title.includes("Daily Menu")
@@ -73,12 +73,9 @@ async function updateMenuInKB(kbId, menuText) {
 
         if (oldMenus.length > 0) {
             console.log(`[Retell SDK] Found ${oldMenus.length} old menu(s). Cleaning up...`);
-            // Use Promise.all for faster parallel deletion
             await Promise.all(oldMenus.map(source =>
                 deleteSource(kbId, source.knowledge_base_source_id)
             ));
-
-            // Short safety delay
             await new Promise(r => setTimeout(r, 1000));
         }
     }

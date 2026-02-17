@@ -107,18 +107,42 @@ app.post('/webhook/retell', async (req, res) => {
         }
 
         /* ============================================================
-           Scenario 2: Book Reservation
+           Scenario 2: Book Reservation (Now with Email)
            ============================================================ */
         else if (action === 'book_reservation') {
-            const { customer_name, customer_phone, date_time, party_size } = parameters;
+            // [Update] Extract customer_email
+            const { customer_name, customer_phone, customer_email, date_time, party_size } = parameters;
+
+            console.log(`[Reservation] Name: ${customer_name}, Email: ${customer_email}, Time: ${date_time}`);
+
+            // 1. Create Receipt in Loyverse
             const result = await loyverse.createReservationReceipt(customer_name, customer_phone, date_time, party_size);
 
             if (!result.success) {
                 return res.json({ success: false, message: "I'm sorry, I couldn't access the reservation system right now." });
             }
+
+            // 2. Send Confirmation Email (New Feature)
+            if (customer_email) {
+                const emailSubject = `Reservation Confirmed - JM Pizza`;
+                const emailHtml = `
+                    <h2>Reservation Confirmed!</h2>
+                    <p>Dear <b>${customer_name}</b>,</p>
+                    <p>We are excited to see you!</p>
+                    <ul>
+                        <li><b>Date & Time:</b> ${date_time}</li>
+                        <li><b>Party Size:</b> ${party_size} people</li>
+                        <li><b>Confirmation #:</b> ${result.receipt_number}</li>
+                    </ul>
+                    <p>See you soon at JM Pizza!</p>
+                `;
+                // Send email but don't block the response if it fails
+                email.sendEmail(customer_email, emailSubject, emailHtml).catch(err => console.error("Email failed:", err));
+            }
+
             return res.json({
                 success: true,
-                message: `Reservation confirmed. Number is ${result.receipt_number}.`,
+                message: `Reservation confirmed for ${customer_name}. A confirmation email has been sent.`,
                 receipt_number: result.receipt_number
             });
         }

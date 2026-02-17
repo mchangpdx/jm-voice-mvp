@@ -41,11 +41,11 @@ async function getPaymentTypeId() {
     }
 }
 
+// Helper: Find a single item's details
 async function findItemPrice(itemName) {
     try {
         const storeId = await getStoreId();
         let cursor = null;
-        console.log(`[Loyverse] Searching for "${itemName}"...`);
 
         do {
             const url = cursor ? `/items?cursor=${cursor}` : '/items';
@@ -70,8 +70,6 @@ async function findItemPrice(itemName) {
 
                     finalPrice = Number(finalPrice);
 
-                    console.log(`[Loyverse] Found: ${foundItem.item_name} (Price: ${finalPrice})`);
-
                     return {
                         name: foundItem.item_name,
                         price: finalPrice,
@@ -81,8 +79,6 @@ async function findItemPrice(itemName) {
             }
             cursor = response.data.cursor;
         } while (cursor);
-
-        console.log(`[Loyverse] Item "${itemName}" not found.`);
         return null;
     } catch (error) {
         console.error(`[Loyverse] findItemPrice error: ${error.message}`);
@@ -90,42 +86,49 @@ async function findItemPrice(itemName) {
     }
 }
 
-// [Fix] Generic function to create a receipt (for both Orders and Reservations)
-async function createReceipt(itemDetails, customerInfo, note = "") {
+// [Updated] Create Receipt for Multiple Items (Cart)
+async function createReceipt(lineItems, note = "") {
     try {
         const storeId = await getStoreId();
         const paymentTypeId = await getPaymentTypeId();
 
         if (!storeId || !paymentTypeId) return { success: false, message: "Missing Store/Payment ID" };
 
+        // Calculate Total
+        let totalMoney = 0;
+        lineItems.forEach(item => {
+            totalMoney += (item.price * item.quantity);
+        });
+
         const payload = {
             receipt_type: "SALE",
             store_id: storeId,
-            total_money: itemDetails.price, // For orders, this is real price. For reservations, likely 0.
-            line_items: [{
-                variant_id: itemDetails.variant_id,
-                quantity: 1,
-                price: itemDetails.price,
-                note: note
-            }],
+            total_money: totalMoney,
+            line_items: lineItems.map(item => ({
+                variant_id: item.variant_id,
+                quantity: item.quantity,
+                price: item.price,
+                note: item.note || ""
+            })),
             payments: [{
                 payment_type_id: paymentTypeId,
-                amount_money: itemDetails.price
+                amount_money: totalMoney
             }],
             note: note
         };
 
         const response = await apiClient.post('/receipts', payload);
-        console.log(`[Loyverse] Receipt Created: ${response.data.receipt_number}`);
+        console.log(`[Loyverse] Receipt Created: ${response.data.receipt_number} (Total: ${totalMoney})`);
 
         return {
             success: true,
-            receipt_number: response.data.receipt_number
+            receipt_number: response.data.receipt_number,
+            total_money: totalMoney
         };
 
     } catch (error) {
         console.error(`[Loyverse] Create Receipt Failed: ${error.message}`);
-        return { success: false, message: error.message };
+        return { success: false, message: "Failed to create receipt" };
     }
 }
 

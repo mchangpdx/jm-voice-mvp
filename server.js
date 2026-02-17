@@ -13,7 +13,6 @@ app.post('/webhook/retell', async (req, res) => {
     try {
         console.log("Incoming Request:", JSON.stringify(req.body, null, 2));
 
-        // [Fix] Handle both manual Curl (action/parameters) and Retell (name/args)
         const body = req.body;
         const action = body.action || body.name;
         const parameters = body.parameters || body.args || {};
@@ -21,77 +20,115 @@ app.post('/webhook/retell', async (req, res) => {
         console.log(`[Processing] Action: ${action}, Params: ${JSON.stringify(parameters)}`);
 
         /* ============================================================
-           Scenario 1: Create Order (Hybrid: SMS + Email + Loyverse Receipt)
+           Scenario 1: Create Order (Cart - Multiple Items)
            ============================================================ */
         if (action === 'create_order') {
-            const { item_name, customer_phone, customer_email } = parameters;
-            const itemName = item_name || parameters.itemName;
+            const { customer_phone, customer_email } = parameters;
 
-            console.log(`[Order] Item: ${itemName}, Phone: ${customer_phone}, Email: ${customer_email}`);
+            // Support both single item (item_name) and multiple items (items array)
+            let itemNames = [];
+            if (parameters.items && Array.isArray(parameters.items)) {
+                // Cart mode: [{name: "Pizza", quantity: 2}, {name: "Coke", quantity: 1}]
+                itemNames = parameters.items;
+            } else {
+                // Legacy single item mode
+                const itemName = parameters.item_name || parameters.itemName;
+                if (itemName) {
+                    itemNames = [{ name: itemName, quantity: 1 }];
+                }
+            }
 
-            // 1. Check Price from Loyverse
-            const item = await loyverse.findItemPrice(itemName);
+            if (itemNames.length === 0) {
+                return res.json({ success: false, message: "No items specified in the order." });
+            }
 
-            if (!item) {
-                console.log(`[Order] Error: Item '${itemName}' not found in Loyverse.`);
-                return res.json({
-                    success: false,
-                    message: `Sorry, I couldn't find '${itemName}' on the menu. Please check the name.`
+            console.log(`[Order] Items: ${JSON.stringify(itemNames)}, Phone: ${customer_phone}, Email: ${customer_email}`);
+
+            // 1. Look up each item in Loyverse
+            const lineItems = [];
+            const notFoundItems = [];
+
+            for (const entry of itemNames) {
+                const item = await loyverse.findItemPrice(entry.name);
+                if (!item) {
+                    notFoundItems.push(entry.name);
+                    continue;
+                }
+
+                // Validate price
+                if (!item.price || isNaN(item.price) || item.price < 0.50) {
+                    console.log(`[Order] Invalid price for ${item.name}: ${item.price}`);
+                    notFoundItems.push(entry.name);
+                    continue;
+                }
+
+                lineItems.push({
+                    name: item.name,
+                    price: item.price,
+                    variant_id: item.variant_id,
+                    quantity: entry.quantity || 1
                 });
             }
 
-            const finalPrice = item.price;
-            const finalItemName = item.name;
-
-            // Strict Check: Validate Price for Stripe (Must be >= $0.50)
-            if (!finalPrice || isNaN(finalPrice) || finalPrice < 0.50) {
-                 console.log(`[Order] Error: Price (${finalPrice}) is invalid/too low.`);
-                 return res.json({
-                     success: false,
-                     message: `Error: The price for ${finalItemName} is invalid (${finalPrice}).`
-                 });
+            // If no valid items found
+            if (lineItems.length === 0) {
+                return res.json({
+                    success: false,
+                    message: `Sorry, I couldn't find these items: ${notFoundItems.join(', ')}`
+                });
             }
 
-            // 2. Create Receipt in Loyverse (Fix: Orders now appear in POS)
-            const orderNote = `[ORDER] ${finalItemName} - Phone: ${customer_phone || 'N/A'}`;
-            const receiptResult = await loyverse.createReceipt(item, { phone: customer_phone }, orderNote);
+            // 2. Calculate total
+            let totalPrice = 0;
+            lineItems.forEach(item => { totalPrice += item.price * item.quantity; });
+
+            // Build order summary
+            const orderSummary = lineItems.map(i => `${i.name} x${i.quantity} ($${i.price})`).join(', ');
+            console.log(`[Order] Summary: ${orderSummary} | Total: $${totalPrice}`);
+
+            // 3. Create Receipt in Loyverse (Cart)
+            const orderNote = `[ORDER] ${orderSummary} - Phone: ${customer_phone || 'N/A'}`;
+            const receiptResult = await loyverse.createReceipt(lineItems, orderNote);
             if (receiptResult.success) {
                 console.log(`[Order] Loyverse Receipt: ${receiptResult.receipt_number}`);
             } else {
                 console.error(`[Order] Loyverse Receipt failed: ${receiptResult.message}`);
             }
 
-            // 3. Generate Stripe Payment Link
-            const longLink = await stripe.createPaymentLink(finalItemName, finalPrice, customer_phone);
+            // 4. Generate Stripe Payment Link (using total)
+            const longLink = await stripe.createPaymentLink(`JM Cafe Order`, totalPrice, customer_phone);
             if (!longLink) {
                 return res.json({ success: false, message: 'Failed to generate payment link.' });
             }
 
-            // 4. Shorten Link
+            // 5. Shorten Link
             let shortLink = longLink;
             try { shortLink = await TinyURL.shorten(longLink); } catch (e) {
                 console.error("[TinyURL] Failed, using long link");
             }
 
-            // 5. Send Notifications (Hybrid)
+            // 6. Send Notifications (Hybrid)
             let sentChannels = [];
 
-            // A. Try SMS (Fail-safe)
             if (customer_phone) {
-                const smsMsg = `[JM Cafe] Order: ${finalItemName} ($${finalPrice}). Pay here: ${shortLink}`;
+                const smsMsg = `[JM Cafe] Order: ${orderSummary}. Total: $${totalPrice}. Pay: ${shortLink}`;
                 const smsResult = await sms.sendSMS(customer_phone, smsMsg);
                 if (smsResult) sentChannels.push("SMS");
                 else console.log("[Order] SMS failed, trying email...");
             }
 
-            // B. Try Email (Essential)
             if (customer_email) {
-                const emailSubject = `Payment Link for your ${finalItemName}`;
+                const itemsHtml = lineItems.map(i =>
+                    `<li>${i.name} x${i.quantity} — $${(i.price * i.quantity).toFixed(2)}</li>`
+                ).join('');
+
+                const emailSubject = `Your JM Cafe Order - $${totalPrice.toFixed(2)}`;
                 const emailHtml = `
                     <h2>Order Confirmation - JM Cafe</h2>
-                    <p>You ordered: <b>${finalItemName}</b></p>
-                    <p>Price: <b>$${finalPrice}</b></p>
-                    <p>Click the link below to pay securely:</p>
+                    <ul>${itemsHtml}</ul>
+                    <p><b>Total: $${totalPrice.toFixed(2)}</b></p>
+                    ${notFoundItems.length > 0 ? `<p style="color:red;">Items not found: ${notFoundItems.join(', ')}</p>` : ''}
+                    <p>Click below to pay securely:</p>
                     <p><a href="${shortLink}" style="background-color:#4CAF50; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;">Pay Now</a></p>
                 `;
                 const emailResult = await email.sendEmail(customer_email, emailSubject, emailHtml);
@@ -102,10 +139,18 @@ app.post('/webhook/retell', async (req, res) => {
                 ? `I've sent the payment link via ${sentChannels.join(' and ')}.`
                 : "I couldn't send the notification, but the order link is generated.";
 
+            // Warn about missing items
+            if (notFoundItems.length > 0) {
+                responseMsg += ` Note: Could not find ${notFoundItems.join(', ')}.`;
+            }
+
             return res.json({
                 success: true,
                 content: responseMsg,
                 payment_link: shortLink,
+                total: totalPrice,
+                items_found: lineItems.map(i => ({ name: i.name, qty: i.quantity, price: i.price })),
+                items_not_found: notFoundItems,
                 receipt_number: receiptResult.success ? receiptResult.receipt_number : null
             });
         }
@@ -124,10 +169,15 @@ app.post('/webhook/retell', async (req, res) => {
                 return res.json({ success: false, message: "Reservation item missing in POS." });
             }
 
-            // 2. Create Receipt with $0 price
+            // 2. Create Receipt with $0 price (single item in array format)
             const reservationNote = `[RESERVATION]\nName: ${customer_name}\nPhone: ${customer_phone}\nTime: ${date_time}\nPax: ${party_size}`;
-            const reservationDetails = { ...reservationItem, price: 0 }; // Override price to 0
-            const result = await loyverse.createReceipt(reservationDetails, { name: customer_name, phone: customer_phone }, reservationNote);
+            const lineItems = [{
+                variant_id: reservationItem.variant_id,
+                quantity: 1,
+                price: 0,
+                note: `Party: ${party_size}`
+            }];
+            const result = await loyverse.createReceipt(lineItems, reservationNote);
 
             if (!result.success) {
                 return res.json({ success: false, message: "I'm sorry, I couldn't access the reservation system right now." });

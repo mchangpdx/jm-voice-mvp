@@ -1,4 +1,4 @@
-/* modules/retell.js - Robust Version */
+/* modules/retell.js - Smart Update & Collision Fix */
 const axios = require('axios');
 require('dotenv').config();
 
@@ -10,37 +10,36 @@ const headers = {
     'Content-Type': 'application/json'
 };
 
-// 1. Get KB Info (to verify connection)
+// 1. Get KB Info (Source List)
 async function getKnowledgeBase(kbId) {
     try {
-        console.log(`[Retell] Fetching KB Info: ${kbId}`);
+        // console.log(`[Retell] Fetching KB Info: ${kbId}`);
         const response = await axios.get(`${RETELL_API_URL}/get-knowledge-base/${kbId}`, { headers });
         return response.data;
     } catch (error) {
         console.error(`[Retell] Get KB Error: ${error.message}`);
-        // If this fails, the ID is wrong or Key is wrong
         throw error;
     }
 }
 
-// 2. Delete Source (Cleanup)
+// 2. Delete Specific Source
 async function deleteSource(kbId, sourceId) {
     try {
-        console.log(`[Retell] Deleting old source: ${sourceId}`);
+        console.log(`[Retell] Deleting old menu source: ${sourceId}`);
         await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${kbId}/${sourceId}`, { headers });
-        // Wait a bit for the deletion to propagate
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Pause briefly to ensure deletion is processed on server side
+        await new Promise(r => setTimeout(r, 500));
     } catch (error) {
-        console.warn(`[Retell] Delete Source Warning: ${error.message} (Continuing...)`);
+        console.warn(`[Retell] Delete Warning: ${error.message}`);
     }
 }
 
-// 3. Add Text Source (With Unique Title)
+// 3. Add New Source (With Unique Timestamp)
 async function addTextSource(kbId, menuText) {
     try {
-        // [Fix] Use a unique title to prevent 500 errors from backend collisions
-        const today = new Date().toISOString().split('T')[0];
-        const uniqueTitle = `Daily Menu (${today} - ${Date.now()})`;
+        // [Critical Fix] Append Timestamp to title to avoid 500 Duplicate Error
+        const timestamp = new Date().toISOString().replace(/T/, ' ').replace(/\..+/, '');
+        const uniqueTitle = `Daily Menu [${timestamp}]`;
 
         const payload = {
             knowledge_base_texts: [
@@ -51,7 +50,7 @@ async function addTextSource(kbId, menuText) {
             ]
         };
 
-        console.log(`[Retell] Sending Payload to ${kbId}...`);
+        console.log(`[Retell] Uploading: "${uniqueTitle}"`);
 
         const response = await axios.post(
             `${RETELL_API_URL}/add-knowledge-base-sources/${kbId}`,
@@ -59,7 +58,7 @@ async function addTextSource(kbId, menuText) {
             { headers }
         );
 
-        console.log(`[Retell] Success! Source added. ID: ${response.data.knowledge_base_sources?.[0]?.knowledge_base_source_id}`);
+        console.log(`[Retell] Success! New Source ID: ${response.data.knowledge_base_sources?.[0]?.knowledge_base_source_id}`);
         return response.data;
     } catch (error) {
         if (error.response) {
@@ -72,24 +71,31 @@ async function addTextSource(kbId, menuText) {
     }
 }
 
-// Main Update Function
+// [Main Logic] Smart Update
 async function updateMenuInKB(kbId, menuText) {
-    console.log('[Retell] Starting Update Process...');
+    console.log('[Retell] Starting Smart Menu Update...');
 
-    // 1. Get current sources
+    // Step A: Get current sources
     const kbData = await getKnowledgeBase(kbId);
 
-    // 2. Delete OLD "Daily Menu" sources (Clean up)
+    // Step B: Find ONLY "Daily Menu" sources to delete
+    // We leave "Parking Info", "Wifi", etc. completely alone.
     if (kbData.knowledge_base_sources) {
-        for (const source of kbData.knowledge_base_sources) {
-            // Delete if it starts with "Daily Menu"
-            if (source.title.startsWith("Daily Menu")) {
+        const oldMenus = kbData.knowledge_base_sources.filter(source =>
+            source.title && source.title.includes("Daily Menu")
+        );
+
+        if (oldMenus.length > 0) {
+            console.log(`[Retell] Found ${oldMenus.length} old menu file(s). Cleaning up...`);
+            for (const source of oldMenus) {
                 await deleteSource(kbId, source.knowledge_base_source_id);
             }
+        } else {
+            console.log(`[Retell] No old menu files found. Clean start.`);
         }
     }
 
-    // 3. Add NEW menu
+    // Step C: Add the new menu
     await addTextSource(kbId, menuText);
 
     return true;

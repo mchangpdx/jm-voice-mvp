@@ -1,4 +1,4 @@
-/* modules/retell.js - Smart Update & Collision Fix */
+/* modules/retell.js - Final Payload Fix */
 const axios = require('axios');
 require('dotenv').config();
 
@@ -10,10 +10,9 @@ const headers = {
     'Content-Type': 'application/json'
 };
 
-// 1. Get KB Info (Source List)
+// 1. Get KB Info
 async function getKnowledgeBase(kbId) {
     try {
-        // console.log(`[Retell] Fetching KB Info: ${kbId}`);
         const response = await axios.get(`${RETELL_API_URL}/get-knowledge-base/${kbId}`, { headers });
         return response.data;
     } catch (error) {
@@ -22,35 +21,36 @@ async function getKnowledgeBase(kbId) {
     }
 }
 
-// 2. Delete Specific Source
+// 2. Delete Source
 async function deleteSource(kbId, sourceId) {
     try {
-        console.log(`[Retell] Deleting old menu source: ${sourceId}`);
+        console.log(`[Retell] Deleting old source: ${sourceId}`);
         await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${kbId}/${sourceId}`, { headers });
-        // Pause briefly to ensure deletion is processed on server side
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 500)); // Safety delay
     } catch (error) {
         console.warn(`[Retell] Delete Warning: ${error.message}`);
     }
 }
 
-// 3. Add New Source (With Unique Timestamp)
+// 3. Add Text Source (Payload Key Fixed)
 async function addTextSource(kbId, menuText) {
     try {
-        // [Critical Fix] Append Timestamp to title to avoid 500 Duplicate Error
         const timestamp = new Date().toISOString().replace(/T/, ' ').replace(/\..+/, '');
         const uniqueTitle = `Daily Menu [${timestamp}]`;
 
+        // [CRITICAL FIX] Changed 'knowledge_base_texts' to 'knowledge_base_sources'
+        // Added 'type: "text"'
         const payload = {
-            knowledge_base_texts: [
+            knowledge_base_sources: [
                 {
+                    type: "text",
                     title: uniqueTitle,
                     text: menuText
                 }
             ]
         };
 
-        console.log(`[Retell] Uploading: "${uniqueTitle}"`);
+        console.log(`[Retell] Uploading to ${kbId} with Correct Payload...`);
 
         const response = await axios.post(
             `${RETELL_API_URL}/add-knowledge-base-sources/${kbId}`,
@@ -71,31 +71,25 @@ async function addTextSource(kbId, menuText) {
     }
 }
 
-// [Main Logic] Smart Update
+// Main Smart Update Logic
 async function updateMenuInKB(kbId, menuText) {
     console.log('[Retell] Starting Smart Menu Update...');
 
-    // Step A: Get current sources
+    // A. Get current sources
     const kbData = await getKnowledgeBase(kbId);
 
-    // Step B: Find ONLY "Daily Menu" sources to delete
-    // We leave "Parking Info", "Wifi", etc. completely alone.
+    // B. Cleanup Old "Daily Menu" only
     if (kbData.knowledge_base_sources) {
         const oldMenus = kbData.knowledge_base_sources.filter(source =>
             source.title && source.title.includes("Daily Menu")
         );
 
-        if (oldMenus.length > 0) {
-            console.log(`[Retell] Found ${oldMenus.length} old menu file(s). Cleaning up...`);
-            for (const source of oldMenus) {
-                await deleteSource(kbId, source.knowledge_base_source_id);
-            }
-        } else {
-            console.log(`[Retell] No old menu files found. Clean start.`);
+        for (const source of oldMenus) {
+            await deleteSource(kbId, source.knowledge_base_source_id);
         }
     }
 
-    // Step C: Add the new menu
+    // C. Add New Menu
     await addTextSource(kbId, menuText);
 
     return true;

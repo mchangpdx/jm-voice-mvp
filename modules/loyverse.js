@@ -12,18 +12,24 @@ const apiClient = axios.create({
     }
 });
 
-// [Helper] Fetch Store ID
+// Cache Store ID to avoid repeated calls
+let cachedStoreId = null;
+
 async function getStoreId() {
+    if (cachedStoreId) return cachedStoreId;
     try {
         const response = await apiClient.get('/stores');
-        return (response.data.stores && response.data.stores.length > 0) ? response.data.stores[0].id : null;
+        if (response.data.stores && response.data.stores.length > 0) {
+            cachedStoreId = response.data.stores[0].id;
+            return cachedStoreId;
+        }
+        return null;
     } catch (error) {
         console.error('[Loyverse] Failed to fetch Store ID:', error.message);
         return null;
     }
 }
 
-// [Helper] Fetch Payment Type ID (Cash)
 async function getPaymentTypeId() {
     try {
         const response = await apiClient.get('/payment_types');
@@ -37,18 +43,20 @@ async function getPaymentTypeId() {
 }
 
 /**
- * Find Item Price & Details (Fixed Price Logic)
+ * Find Item Price (Store-Specific Logic)
  */
 async function findItemPrice(itemName) {
     try {
+        const storeId = await getStoreId();
         let cursor = null;
-        console.log(`[Loyverse] Searching for item: "${itemName}"...`);
+        console.log(`[Loyverse] Searching for "${itemName}"...`);
 
         do {
             const url = cursor ? `/items?cursor=${cursor}` : '/items';
             const response = await apiClient.get(url);
             const items = response.data.items || [];
 
+            // Fuzzy match name (case-insensitive)
             const foundItem = items.find(item =>
                 item.item_name.toLowerCase().includes(itemName.toLowerCase())
             );
@@ -57,21 +65,34 @@ async function findItemPrice(itemName) {
                 if (foundItem.variants && foundItem.variants.length > 0) {
                     const variant = foundItem.variants[0];
 
-                    // [Fix] Check both 'price' and 'default_price'
-                    let finalPrice = variant.price;
+                    // [Critical Fix] Find price for the specific store
+                    let finalPrice = undefined;
+
+                    if (variant.stores && storeId) {
+                        const storeData = variant.stores.find(s => s.store_id === storeId);
+                        if (storeData) {
+                            finalPrice = storeData.price;
+                        }
+                    }
+
+                    // Fallback to default_price if store price is missing
                     if (finalPrice === undefined || finalPrice === null) {
                         finalPrice = variant.default_price;
                     }
-                    // Safety fallback
+
+                    // Fallback to variant.price (rare case)
                     if (finalPrice === undefined || finalPrice === null) {
-                        finalPrice = 0;
+                        finalPrice = variant.price;
                     }
+
+                    // Ensure it's a number
+                    finalPrice = Number(finalPrice);
 
                     console.log(`[Loyverse] Found: ${foundItem.item_name} (Price: ${finalPrice})`);
 
                     return {
                         name: foundItem.item_name,
-                        price: Number(finalPrice), // Ensure it is a Number
+                        price: finalPrice,
                         variant_id: variant.variant_id
                     };
                 }
@@ -87,19 +108,13 @@ async function findItemPrice(itemName) {
     }
 }
 
-/**
- * Create Reservation Receipt
- */
 async function createReservationReceipt(customerName, customerPhone, dateTime, partySize) {
     try {
         const storeId = await getStoreId();
         if (!storeId) return { success: false, message: "Store ID not found." };
 
-        // Reuse findItemPrice to find "Reservation" item
         const reservationItem = await findItemPrice('Reservation');
-
         if (!reservationItem) {
-            console.error('[Loyverse] "Reservation" item not found.');
             return { success: false, message: "Reservation item missing in POS." };
         }
 
@@ -124,14 +139,11 @@ async function createReservationReceipt(customerName, customerPhone, dateTime, p
         };
 
         const response = await apiClient.post('/receipts', payload);
-        console.log("Reservation Success:", response.data.receipt_number);
-
         return {
             success: true,
             message: 'Reservation confirmed.',
             receipt_number: response.data.receipt_number
         };
-
     } catch (error) {
         const errorDetail = error.response ? JSON.stringify(error.response.data) : error.message;
         console.error(`[Loyverse] Create Receipt Failed: ${errorDetail}`);

@@ -25,22 +25,15 @@ app.post('/webhook/retell', async (req, res) => {
 
             console.log(`[Order] Item: ${itemName}, Phone: ${customer_phone}, Email: ${customer_email}`);
 
-            // 1. Check Price
-            let item = null;
-            if (loyverse.findItemPrice) {
-                item = await loyverse.findItemPrice(itemName);
-            }
+            // 1. Check Price (Strict - no hardcoded fallback)
+            const item = await loyverse.findItemPrice(itemName);
             if (!item) {
-                 // MVP Fallback
-                 if (itemName && itemName.toLowerCase().includes('pizza')) {
-                     item = { name: "Pepperoni Pizza", price: 15.00 };
-                 } else {
-                    return res.json({ success: false, message: `Sorry, I couldn't find '${itemName}' on the menu.` });
-                 }
+                return res.json({ success: false, message: `Sorry, I couldn't find '${itemName}' on the menu.` });
             }
 
             const finalPrice = item.price;
             const finalItemName = item.name || itemName;
+            console.log(`[Order] Loyverse returned: ${finalItemName} = $${finalPrice}`);
 
             // 2. Generate Stripe Link
             const longLink = await stripe.createPaymentLink(finalItemName, finalPrice, customer_phone);

@@ -9,208 +9,142 @@ const TinyURL = require('tinyurl');
 const app = express();
 app.use(express.json());
 
+// [Fix] In-memory storage to prevent duplicate orders from the same call
+// In production, use Redis. For this MVP, a Map is sufficient.
+const processedCalls = new Map();
+
 app.post('/webhook/retell', async (req, res) => {
     try {
-        console.log("Incoming Request:", JSON.stringify(req.body, null, 2));
+        // console.log("Incoming Request:", JSON.stringify(req.body, null, 2));
 
         const body = req.body;
         const action = body.action || body.name;
         const parameters = body.parameters || body.args || {};
 
-        console.log(`[Processing] Action: ${action}, Params: ${JSON.stringify(parameters)}`);
+        // [Fix] Extract Call ID to prevent duplicates
+        const callId = body.call ? body.call.call_id : body.call_id;
 
         /* ============================================================
-           Scenario 1: Create Order (Cart - Multiple Items)
+           Scenario 1: Create Order (With Duplicate Protection)
            ============================================================ */
         if (action === 'create_order') {
-            const { customer_phone, customer_email } = parameters;
 
-            // Support both single item (item_name) and multiple items (items array)
-            let itemNames = [];
-            if (parameters.items && Array.isArray(parameters.items)) {
-                // Cart mode: [{name: "Pizza", quantity: 2}, {name: "Coke", quantity: 1}]
-                itemNames = parameters.items;
-            } else {
-                // Legacy single item mode
-                const itemName = parameters.item_name || parameters.itemName;
-                if (itemName) {
-                    itemNames = [{ name: itemName, quantity: 1 }];
+            // [Critical Fix] Check if this call already placed an order
+            if (callId && processedCalls.has(callId)) {
+                console.log(`[Duplicate Blocked] Call ${callId} tried to order again. Returning cached response.`);
+                return res.json(processedCalls.get(callId));
+            }
+
+            const { items, customer_phone, customer_email } = parameters;
+            console.log(`[Order] Call: ${callId}, Customer: ${customer_email}`);
+
+            if (!items || !Array.isArray(items) || items.length === 0) {
+                 return res.json({ success: false, message: "No items provided." });
+            }
+
+            // 1. Process Basket
+            let basket = [];
+            let receiptLineItems = [];
+            let totalOrderName = "";
+
+            for (const orderItem of items) {
+                const itemDetails = await loyverse.findItemPrice(orderItem.name);
+                if (itemDetails) {
+                    const qty = orderItem.quantity || 1;
+                    basket.push({ ...itemDetails, quantity: qty });
+                    receiptLineItems.push({
+                        variant_id: itemDetails.variant_id,
+                        price: itemDetails.price,
+                        quantity: qty
+                    });
+                    totalOrderName += `${qty}x ${itemDetails.name}, `;
                 }
             }
 
-            if (itemNames.length === 0) {
-                return res.json({ success: false, message: "No items specified in the order." });
+            if (totalOrderName.length > 2) totalOrderName = totalOrderName.slice(0, -2);
+            if (basket.length === 0) {
+                return res.json({ success: false, message: `Couldn't find items on the menu.` });
             }
 
-            console.log(`[Order] Items: ${JSON.stringify(itemNames)}, Phone: ${customer_phone}, Email: ${customer_email}`);
+            // 2. Create Receipt
+            const receiptResult = await loyverse.createReceipt(
+                receiptLineItems,
+                `[AI ORDER] ${customer_email || customer_phone}`
+            );
 
-            // 1. Look up each item in Loyverse
-            const lineItems = [];
-            const notFoundItems = [];
+            const receiptNumber = receiptResult.success ? receiptResult.receipt_number : 'Pending';
+            const finalTotalPrice = receiptResult.total_money;
 
-            for (const entry of itemNames) {
-                const item = await loyverse.findItemPrice(entry.name);
-                if (!item) {
-                    notFoundItems.push(entry.name);
-                    continue;
-                }
-
-                // Validate price
-                if (!item.price || isNaN(item.price) || item.price < 0.50) {
-                    console.log(`[Order] Invalid price for ${item.name}: ${item.price}`);
-                    notFoundItems.push(entry.name);
-                    continue;
-                }
-
-                lineItems.push({
-                    name: item.name,
-                    price: item.price,
-                    variant_id: item.variant_id,
-                    quantity: entry.quantity || 1
-                });
-            }
-
-            // If no valid items found
-            if (lineItems.length === 0) {
-                return res.json({
-                    success: false,
-                    message: `Sorry, I couldn't find these items: ${notFoundItems.join(', ')}`
-                });
-            }
-
-            // 2. Calculate total
-            let totalPrice = 0;
-            lineItems.forEach(item => { totalPrice += item.price * item.quantity; });
-
-            // Build order summary
-            const orderSummary = lineItems.map(i => `${i.name} x${i.quantity} ($${i.price})`).join(', ');
-            console.log(`[Order] Summary: ${orderSummary} | Total: $${totalPrice}`);
-
-            // 3. Create Receipt in Loyverse (Cart)
-            const orderNote = `[ORDER] ${orderSummary} - Phone: ${customer_phone || 'N/A'}`;
-            const receiptResult = await loyverse.createReceipt(lineItems, orderNote);
-            if (receiptResult.success) {
-                console.log(`[Order] Loyverse Receipt: ${receiptResult.receipt_number}`);
-            } else {
-                console.error(`[Order] Loyverse Receipt failed: ${receiptResult.message}`);
-            }
-
-            // 4. Generate Stripe Payment Link (using total)
-            const longLink = await stripe.createPaymentLink(`JM Cafe Order`, totalPrice, customer_phone);
-            if (!longLink) {
-                return res.json({ success: false, message: 'Failed to generate payment link.' });
-            }
-
-            // 5. Shorten Link
+            // 3. Generate Link
+            const longLink = await stripe.createPaymentLink("JM Cafe Order", finalTotalPrice, customer_phone);
             let shortLink = longLink;
-            try { shortLink = await TinyURL.shorten(longLink); } catch (e) {
-                console.error("[TinyURL] Failed, using long link");
-            }
+            try { shortLink = await TinyURL.shorten(longLink); } catch (e) {}
 
-            // 6. Send Notifications (Hybrid)
+            // 4. Notifications
             let sentChannels = [];
-
             if (customer_phone) {
-                const smsMsg = `[JM Cafe] Order: ${orderSummary}. Total: $${totalPrice}. Pay: ${shortLink}`;
-                const smsResult = await sms.sendSMS(customer_phone, smsMsg);
-                if (smsResult) sentChannels.push("SMS");
-                else console.log("[Order] SMS failed, trying email...");
+                const smsMsg = `[JM Cafe] Order: ${totalOrderName}. Total: ${finalTotalPrice}. Pay: ${shortLink}`;
+                if (await sms.sendSMS(customer_phone, smsMsg)) sentChannels.push("SMS");
             }
-
             if (customer_email) {
-                const itemsHtml = lineItems.map(i =>
-                    `<li>${i.name} x${i.quantity} — $${(i.price * i.quantity).toFixed(2)}</li>`
-                ).join('');
-
-                const emailSubject = `Your JM Cafe Order - $${totalPrice.toFixed(2)}`;
+                const emailSubject = `Order Confirmation - JM Cafe`;
+                let itemRows = basket.map(b => `<li>${b.quantity} x ${b.name} (${b.price})</li>`).join('');
                 const emailHtml = `
                     <h2>Order Confirmation - JM Cafe</h2>
-                    <ul>${itemsHtml}</ul>
-                    <p><b>Total: $${totalPrice.toFixed(2)}</b></p>
-                    ${notFoundItems.length > 0 ? `<p style="color:red;">Items not found: ${notFoundItems.join(', ')}</p>` : ''}
-                    <p>Click below to pay securely:</p>
-                    <p><a href="${shortLink}" style="background-color:#4CAF50; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;">Pay Now</a></p>
+                    <ul>${itemRows}</ul>
+                    <p><b>Total: ${finalTotalPrice}</b></p>
+                    <p>Order #: <b>${receiptNumber}</b></p>
+                    <p><a href="${shortLink}">Pay Now</a></p>
                 `;
-                const emailResult = await email.sendEmail(customer_email, emailSubject, emailHtml);
-                if (emailResult) sentChannels.push("Email");
+                email.sendEmail(customer_email, emailSubject, emailHtml);
+                sentChannels.push("Email");
             }
 
-            let responseMsg = sentChannels.length > 0
-                ? `I've sent the payment link via ${sentChannels.join(' and ')}.`
-                : "I couldn't send the notification, but the order link is generated.";
-
-            // Warn about missing items
-            if (notFoundItems.length > 0) {
-                responseMsg += ` Note: Could not find ${notFoundItems.join(', ')}.`;
-            }
-
-            return res.json({
+            // [Fix] AI Response Instruction
+            // Explicitly tell the AI NOT to read the link.
+            const responseData = {
                 success: true,
-                content: responseMsg,
-                payment_link: shortLink,
-                total: totalPrice,
-                items_found: lineItems.map(i => ({ name: i.name, qty: i.quantity, price: i.price })),
-                items_not_found: notFoundItems,
-                receipt_number: receiptResult.success ? receiptResult.receipt_number : null
-            });
+                content: `Order successfully placed (Receipt #${receiptNumber}). Total: ${finalTotalPrice}. Notifications sent via ${sentChannels.join(' and ')}.
+                          IMPORTANT: Tell the user you have sent the receipt and payment link to their phone/email.
+                          DO NOT read the HTTP link URL out loud. Just ask if they need anything else.`,
+                payment_link: shortLink
+            };
+
+            // [Critical Fix] Save this response for this Call ID
+            if (callId) {
+                processedCalls.set(callId, responseData);
+            }
+
+            return res.json(responseData);
         }
 
         /* ============================================================
-           Scenario 2: Book Reservation (with Email)
+           Scenario 2: Book Reservation
            ============================================================ */
         else if (action === 'book_reservation') {
-            const { customer_name, customer_phone, customer_email, date_time, party_size } = parameters;
+            const { customer_name, customer_email, date_time, party_size } = parameters;
+            let reservationItem = await loyverse.findItemPrice('Reservation');
 
-            console.log(`[Reservation] Name: ${customer_name}, Email: ${customer_email}, Time: ${date_time}`);
+            if (!reservationItem) return res.json({ success: false, message: "System error." });
 
-            // 1. Find the "Reservation" item in Loyverse
-            const reservationItem = await loyverse.findItemPrice('Reservation');
-            if (!reservationItem) {
-                return res.json({ success: false, message: "Reservation item missing in POS." });
-            }
+            const result = await loyverse.createReceipt(
+                [{ variant_id: reservationItem.variant_id, price: 0, quantity: 1 }],
+                `[RESERVATION]\nName: ${customer_name}\nTime: ${date_time}\nPax: ${party_size}`
+            );
 
-            // 2. Create Receipt with $0 price (single item in array format)
-            const reservationNote = `[RESERVATION]\nName: ${customer_name}\nPhone: ${customer_phone}\nTime: ${date_time}\nPax: ${party_size}`;
-            const lineItems = [{
-                variant_id: reservationItem.variant_id,
-                quantity: 1,
-                price: 0,
-                note: `Party: ${party_size}`
-            }];
-            const result = await loyverse.createReceipt(lineItems, reservationNote);
-
-            if (!result.success) {
-                return res.json({ success: false, message: "I'm sorry, I couldn't access the reservation system right now." });
-            }
-
-            // 3. Send Confirmation Email
             if (customer_email) {
-                const emailSubject = `Reservation Confirmed - JM Cafe`;
-                const emailHtml = `
-                    <h2>Reservation Confirmed!</h2>
-                    <p>Dear <b>${customer_name}</b>,</p>
-                    <p>We are excited to see you!</p>
-                    <ul>
-                        <li><b>Date & Time:</b> ${date_time}</li>
-                        <li><b>Party Size:</b> ${party_size} people</li>
-                        <li><b>Confirmation #:</b> ${result.receipt_number}</li>
-                    </ul>
-                    <p>See you soon at JM Cafe!</p>
-                `;
-                email.sendEmail(customer_email, emailSubject, emailHtml).catch(err => console.error("Email failed:", err));
+                 const emailSubject = `Reservation Confirmed - JM Cafe`;
+                 const emailHtml = `<h2>Confirmed!</h2><p>${date_time}, ${party_size} people</p>`;
+                 email.sendEmail(customer_email, emailSubject, emailHtml);
             }
 
             return res.json({
                 success: true,
-                message: `Reservation confirmed for ${customer_name}. A confirmation email has been sent.`,
-                receipt_number: result.receipt_number
+                message: `Reservation confirmed for ${customer_name}. Receipt #${result.receipt_number}.`
             });
         }
-
-        // Handle Unknown Actions
         else {
-            console.log(`[Error] Unknown action/name: ${action}`);
-            return res.json({ success: false, message: `Unknown action: ${action}` });
+            return res.json({ success: false, message: `Unknown action` });
         }
 
     } catch (error) {

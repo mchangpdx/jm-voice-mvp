@@ -1,66 +1,92 @@
-/* modules/retell.js - Fixed SDK Payload */
-const Retell = require('retell-sdk');
+/* modules/retell.js - Multipart/Form-Data Fix */
+const axios = require('axios');
+const FormData = require('form-data');
 require('dotenv').config();
 
+const RETELL_API_URL = 'https://api.retellai.com';
 const API_KEY = process.env.RETELL_API_KEY;
 
-// Initialize SDK
-const client = new Retell({
-    apiKey: API_KEY,
-});
-
-// 1. Get KB Info
+// 1. Get KB Info (Standard JSON GET)
 async function getKnowledgeBase(kbId) {
     try {
-        const response = await client.knowledgeBase.retrieve(kbId);
-        return response;
+        const response = await axios.get(`${RETELL_API_URL}/get-knowledge-base/${kbId}`, {
+            headers: {
+                'Authorization': `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        return response.data;
     } catch (error) {
-        console.error(`[Retell SDK] Get Error: ${error.message}`);
+        console.error(`[Retell] Get KB Error: ${error.message}`);
         throw error;
     }
 }
 
-// 2. Delete Source
+// 2. Delete Source (Standard JSON DELETE)
 async function deleteSource(kbId, sourceId) {
     try {
-        console.log(`[Retell SDK] Deleting source: ${sourceId}`);
-        await client.knowledgeBase.deleteSource(kbId, sourceId);
+        console.log(`[Retell] Deleting source: ${sourceId}`);
+        await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${kbId}/${sourceId}`, {
+            headers: {
+                'Authorization': `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
     } catch (error) {
-        console.warn(`[Retell SDK] Delete Warning: ${error.message}`);
+        console.warn(`[Retell] Delete Warning: ${error.message}`);
     }
 }
 
-// 3. Add Text Source (FIXED KEY)
+// 3. Add Text Source (MULTIPART/FORM-DATA Request)
 async function addTextSource(kbId, menuText) {
     try {
         const now = new Date();
         const timeString = `${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()} ${now.getHours()}h${now.getMinutes()}m`;
         const uniqueTitle = `Daily Menu ${timeString}`;
 
-        console.log(`[Retell SDK] Adding source: "${uniqueTitle}"`);
+        console.log(`[Retell] Constructing Multipart Payload for: "${uniqueTitle}"`);
 
-        // [CRITICAL FIX] Use 'knowledge_base_sources' key with 'type: "text"'
-        const response = await client.knowledgeBase.addSources(kbId, {
-            knowledge_base_sources: [
-                {
-                    type: "text", // Required
-                    title: uniqueTitle,
-                    text: menuText
+        // [CRITICAL FIX] Create a Multipart Form
+        const form = new FormData();
+
+        // The API expects 'knowledge_base_texts' as a JSON string inside the form
+        const textsPayload = JSON.stringify([
+            {
+                title: uniqueTitle,
+                text: menuText
+            }
+        ]);
+
+        form.append('knowledge_base_texts', textsPayload);
+
+        // Send Request
+        const response = await axios.post(
+            `${RETELL_API_URL}/add-knowledge-base-sources/${kbId}`,
+            form,
+            {
+                headers: {
+                    ...form.getHeaders(), // Sets Content-Type: multipart/form-data; boundary=...
+                    'Authorization': `Bearer ${API_KEY}`
                 }
-            ]
-        });
+            }
+        );
 
-        console.log(`[Retell SDK] Success! Added new source.`);
-        return response;
+        console.log(`[Retell] Success! New Source Added.`);
+        return response.data;
     } catch (error) {
-        console.error(`[Retell SDK] Add Error: ${error.message}`);
+        if (error.response) {
+            console.error(`[Retell Error] Status: ${error.response.status}`);
+            console.error(`[Retell Error] Data:`, JSON.stringify(error.response.data, null, 2));
+        } else {
+            console.error(`[Retell Error] ${error.message}`);
+        }
         throw error;
     }
 }
 
 // Main Logic
 async function updateMenuInKB(kbId, menuText) {
-    console.log('[Retell SDK] Starting Menu Update...');
+    console.log('[Retell] Starting Manual Multipart Update...');
 
     // A. Fetch Current Sources
     const kbData = await getKnowledgeBase(kbId);
@@ -72,10 +98,10 @@ async function updateMenuInKB(kbId, menuText) {
         );
 
         if (oldMenus.length > 0) {
-            console.log(`[Retell SDK] Found ${oldMenus.length} old menu(s). Cleaning up...`);
-            await Promise.all(oldMenus.map(source =>
-                deleteSource(kbId, source.knowledge_base_source_id)
-            ));
+            console.log(`[Retell] Found ${oldMenus.length} old menu(s). Cleaning up...`);
+            for (const source of oldMenus) {
+                await deleteSource(kbId, source.knowledge_base_source_id);
+            }
             await new Promise(r => setTimeout(r, 1000));
         }
     }

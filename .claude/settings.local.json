@@ -6,7 +6,8 @@
       "Bash(git commit:*)",
       "Bash(gh:*)",
       "Bash(git push:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(npm ls:*)"
     ]
   }
 }

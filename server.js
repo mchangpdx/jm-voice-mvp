@@ -3,14 +3,12 @@ const express = require('express');
 const loyverse = require('./modules/loyverse');
 const stripe = require('./modules/stripe');
 const sms = require('./modules/sms');
-const TinyURL = require('tinyurl'); // Import TinyURL
+const email = require('./modules/email'); // Import Email
+const TinyURL = require('tinyurl');
 
 const app = express();
 app.use(express.json());
 
-/**
- * Retell AI Webhook Endpoint
- */
 app.post('/webhook/retell', async (req, res) => {
     try {
         console.log("Incoming Request:", JSON.stringify(req.body, null, 2));
@@ -19,66 +17,78 @@ app.post('/webhook/retell', async (req, res) => {
         const parameters = req.body.parameters || {};
 
         /* ============================================================
-           Scenario 1: Create Order & Send Short SMS
+           Scenario 1: Create Order (Hybrid: SMS + Email)
            ============================================================ */
         if (action === 'create_order') {
-            const { item_name, customer_phone } = parameters;
+            const { item_name, customer_phone, customer_email } = parameters; // Accept Email
             const itemName = item_name || parameters.itemName;
 
-            console.log(`[Order] Item: ${itemName}, Phone: ${customer_phone}`);
+            console.log(`[Order] Item: ${itemName}, Phone: ${customer_phone}, Email: ${customer_email}`);
 
-            // 1. Check Price (Loyverse)
+            // 1. Check Price
             let item = null;
             if (loyverse.findItemPrice) {
                 item = await loyverse.findItemPrice(itemName);
             }
-
-            // Fallback
             if (!item) {
-                if (itemName && itemName.toLowerCase().includes('pizza')) {
-                     console.log("[Order] Item not found, using fallback price for Pizza.");
+                 // MVP Fallback
+                 if (itemName && itemName.toLowerCase().includes('pizza')) {
                      item = { name: "Pepperoni Pizza", price: 15.00 };
-                } else {
-                    return res.json({
-                        success: false,
-                        message: `Sorry, I couldn't find '${itemName}' on the menu.`
-                    });
-                }
+                 } else {
+                    return res.json({ success: false, message: `Sorry, I couldn't find '${itemName}' on the menu.` });
+                 }
             }
 
             const finalPrice = item.price;
             const finalItemName = item.name || itemName;
 
-            // 2. Generate Stripe Payment Link (Long URL)
+            // 2. Generate Stripe Link
             const longLink = await stripe.createPaymentLink(finalItemName, finalPrice, customer_phone);
+            if (!longLink) return res.json({ success: false, message: 'Failed to generate payment link.' });
 
-            if (!longLink) {
-                return res.json({ success: false, message: 'Failed to generate payment link.' });
-            }
-
-            // 3. Shorten the Link (Fix for Twilio Error 30004)
-            // (긴 링크를 단축 URL로 변환)
+            // 3. Shorten Link
             let shortLink = longLink;
-            try {
-                shortLink = await TinyURL.shorten(longLink);
-                console.log(`[Link] Shortened: ${shortLink}`);
-            } catch (err) {
-                console.error("[Link] Shortener failed, using long link:", err);
-            }
+            try { shortLink = await TinyURL.shorten(longLink); } catch (e) {}
 
-            // 4. Send SMS with Short Link
+            // 4. Send Notifications (Hybrid)
+            let sentChannels = [];
+
+            // A. Try SMS (Fail-safe)
             if (customer_phone) {
-                // Keep message short!
-                const message = `[JM Pizza] Order: ${finalItemName} (${finalPrice}). Pay here: ${shortLink}`;
-                await sms.sendSMS(customer_phone, message);
+                const smsMsg = `[JM Pizza] Order: ${finalItemName} ($${finalPrice}). Pay here: ${shortLink}`;
+                const smsResult = await sms.sendSMS(customer_phone, smsMsg);
+                if (smsResult) sentChannels.push("SMS");
+                else console.log("[Order] SMS failed (likely Twilio regulation), trying email...");
             }
 
-            console.log(`[Order] Completed. Link: ${shortLink}`);
+            // B. Try Email
+            if (customer_email) {
+                const emailSubject = `Payment Link for your ${finalItemName}`;
+                const emailHtml = `
+                    <h2>Order Confirmation - JM Pizza</h2>
+                    <p>You ordered: <b>${finalItemName}</b></p>
+                    <p>Price: <b>$${finalPrice}</b></p>
+                    <p>Click the link below to pay securely:</p>
+                    <p><a href="${shortLink}" style="background-color:#4CAF50; color:white; padding:10px 20px; text-decoration:none;">Pay Now</a></p>
+                    <p>Or verify receipt number later.</p>
+                `;
+                const emailResult = await email.sendEmail(customer_email, emailSubject, emailHtml);
+                if (emailResult) sentChannels.push("Email");
+            }
+
+            // 5. Response
+            let responseMsg = "";
+            if (sentChannels.length > 0) {
+                responseMsg = `I've sent the payment link via ${sentChannels.join(' and ')}.`;
+            } else {
+                // If both failed, give the link verbally as a last resort
+                responseMsg = "I couldn't send the message, but the order is ready.";
+            }
 
             return res.json({
                 success: true,
-                content: `I've sent a text with the payment link for ${finalItemName}.`,
-                payment_link: shortLink
+                content: responseMsg,
+                payment_link: shortLink 
             });
         }
 
@@ -87,33 +97,17 @@ app.post('/webhook/retell', async (req, res) => {
            ============================================================ */
         else if (action === 'book_reservation') {
             const { customer_name, customer_phone, date_time, party_size } = parameters;
-
-            console.log(`[Reservation] Request for ${customer_name} (${party_size} ppl) at ${date_time}`);
-
-            const result = await loyverse.createReservationReceipt(
-                customer_name,
-                customer_phone,
-                date_time,
-                party_size
-            );
+            const result = await loyverse.createReservationReceipt(customer_name, customer_phone, date_time, party_size);
 
             if (!result.success) {
-                console.error(`[Reservation] Failed: ${result.message}`);
-                return res.json({
-                    success: false,
-                    message: "I'm sorry, I couldn't access the reservation system right now."
-                });
+                return res.json({ success: false, message: "I'm sorry, I couldn't access the reservation system right now." });
             }
-
-            console.log(`[Reservation] Success! Receipt #: ${result.receipt_number}`);
-
-            return res.json({
-                success: true,
-                message: `Reservation confirmed for ${party_size} people. Confirmation number is ${result.receipt_number}.`,
-                receipt_number: result.receipt_number
+            return res.json({ 
+                success: true, 
+                message: `Reservation confirmed. Number is ${result.receipt_number}.`,
+                receipt_number: result.receipt_number 
             });
         }
-
         else {
             return res.json({ success: false, message: `Unknown action: ${action}` });
         }

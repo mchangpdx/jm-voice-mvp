@@ -1,4 +1,4 @@
-/* modules/retell.js - Production Grade (Pure Axios) */
+/* modules/retell.js - Force Delete & Anti-Cache */
 const axios = require('axios');
 const FormData = require('form-data');
 require('dotenv').config();
@@ -6,7 +6,6 @@ require('dotenv').config();
 const RETELL_API_URL = 'https://api.retellai.com';
 const API_KEY = process.env.RETELL_API_KEY;
 
-// Helper to get headers
 function getCommonHeaders() {
     return {
         'Authorization': `Bearer ${API_KEY}`,
@@ -14,12 +13,12 @@ function getCommonHeaders() {
     };
 }
 
-// 1. Get KB Info
+// 1. Get KB Info (Anti-Caching)
 async function getKnowledgeBase(kbId) {
     try {
-        const response = await axios.get(`${RETELL_API_URL}/get-knowledge-base/${kbId}`, {
-            headers: getCommonHeaders()
-        });
+        // [FIX] Add timestamp to prevent caching
+        const url = `${RETELL_API_URL}/get-knowledge-base/${kbId}?_t=${Date.now()}`;
+        const response = await axios.get(url, { headers: getCommonHeaders() });
         return response.data;
     } catch (error) {
         console.error(`[Retell] Get KB Error: ${error.message}`);
@@ -27,30 +26,25 @@ async function getKnowledgeBase(kbId) {
     }
 }
 
-// 2. Delete Source (CORRECTED URL)
+// 2. Delete Source
 async function deleteSource(sourceId) {
+    if (!sourceId) return;
     try {
-        if (!sourceId) return;
-
-        console.log(`[Retell] Deleting source: ${sourceId}`);
-
-        // [FIXED] The API endpoint is /delete-knowledge-base-source/{source_id}
+        console.log(`[Retell] Attempting delete: ${sourceId}`);
         await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${sourceId}`, {
             headers: getCommonHeaders()
         });
-
-        console.log(`[Retell] Deleted: ${sourceId}`);
+        console.log(`[Retell] Delete request sent for: ${sourceId}`);
     } catch (error) {
-        // Ignore 404 (already deleted)
         if (error.response && error.response.status === 404) {
-            console.log(`[Retell] Source already deleted: ${sourceId}`);
-            return;
+            console.log(`[Retell] Already deleted (404): ${sourceId}`);
+        } else {
+            console.warn(`[Retell] Delete Warning: ${error.message}`);
         }
-        console.warn(`[Retell] Delete Warning: ${error.message}`);
     }
 }
 
-// 3. Add Text Source (Multipart/Form-Data)
+// 3. Add Text Source (Multipart)
 async function addTextSource(kbId, menuText) {
     try {
         const now = new Date();
@@ -60,70 +54,57 @@ async function addTextSource(kbId, menuText) {
         console.log(`[Retell] Uploading: "${uniqueTitle}"`);
 
         const form = new FormData();
-        const textsPayload = JSON.stringify([
-            {
-                title: uniqueTitle,
-                text: menuText
-            }
-        ]);
-
+        const textsPayload = JSON.stringify([{ title: uniqueTitle, text: menuText }]);
         form.append('knowledge_base_texts', textsPayload);
 
-        // Axios Post with Multipart Headers
         const response = await axios.post(
             `${RETELL_API_URL}/add-knowledge-base-sources/${kbId}`,
             form,
             {
-                headers: {
-                    ...form.getHeaders(),
-                    'Authorization': `Bearer ${API_KEY}`
-                }
+                headers: { ...form.getHeaders(), 'Authorization': `Bearer ${API_KEY}` }
             }
         );
-
         console.log(`[Retell] Success! New Source Added.`);
         return response.data;
     } catch (error) {
-        if (error.response) {
-            console.error(`[Retell Error] Status: ${error.response.status}`);
-            console.error(`[Retell Error] Data:`, JSON.stringify(error.response.data, null, 2));
-        } else {
-            console.error(`[Retell Error] ${error.message}`);
-        }
+        console.error(`[Retell Error] Upload Failed: ${error.message}`);
         throw error;
     }
 }
 
-// Main Logic
+// Main Logic (Recursive Cleanup)
 async function updateMenuInKB(kbId, menuText) {
-    console.log('[Retell] Starting Menu Sync...');
+    console.log('[Retell] Starting Fresh Sync...');
 
-    // A. Fetch Current Sources
-    const kbData = await getKnowledgeBase(kbId);
+    // Phase 1: Cleanup Loop (Max 3 retries)
+    for (let i = 0; i < 3; i++) {
+        const kbData = await getKnowledgeBase(kbId);
 
-    // B. Smart Cleanup
-    if (kbData.knowledge_base_sources) {
+        if (!kbData.knowledge_base_sources) break;
+
         const oldMenus = kbData.knowledge_base_sources.filter(source =>
             source.title && source.title.includes("Daily Menu")
         );
 
-        if (oldMenus.length > 0) {
-            console.log(`[Retell] Found ${oldMenus.length} old menu(s). Cleaning up...`);
-
-            // Delete all old menus concurrently
-            await Promise.all(oldMenus.map(source => {
-                const idToDelete = source.knowledge_base_source_id || source.source_id || source.id;
-                return deleteSource(idToDelete);
-            }));
-
-            // Wait a moment for Retell to process
-            await new Promise(r => setTimeout(r, 1000));
+        if (oldMenus.length === 0) {
+            console.log("[Retell] Clean slate confirmed. No old menus.");
+            break;
         }
+
+        console.log(`[Retell] Cleanup Round ${i+1}: Found ${oldMenus.length} old items.`);
+
+        // Delete all found
+        await Promise.all(oldMenus.map(source => {
+            // console.log("Source Item:", JSON.stringify(source));
+            return deleteSource(source.knowledge_base_source_id);
+        }));
+
+        // Wait for server to process
+        await new Promise(r => setTimeout(r, 2000));
     }
 
-    // C. Add New Menu
+    // Phase 2: Add New
     await addTextSource(kbId, menuText);
-
     return true;
 }
 

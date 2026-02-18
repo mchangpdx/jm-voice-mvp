@@ -1,4 +1,4 @@
-/* modules/retell.js - Final Delete Fix */
+/* modules/retell.js - Production Grade (Pure Axios) */
 const axios = require('axios');
 const FormData = require('form-data');
 require('dotenv').config();
@@ -6,14 +6,19 @@ require('dotenv').config();
 const RETELL_API_URL = 'https://api.retellai.com';
 const API_KEY = process.env.RETELL_API_KEY;
 
+// Helper to get headers
+function getCommonHeaders() {
+    return {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json'
+    };
+}
+
 // 1. Get KB Info
 async function getKnowledgeBase(kbId) {
     try {
         const response = await axios.get(`${RETELL_API_URL}/get-knowledge-base/${kbId}`, {
-            headers: {
-                'Authorization': `Bearer ${API_KEY}`,
-                'Content-Type': 'application/json'
-            }
+            headers: getCommonHeaders()
         });
         return response.data;
     } catch (error) {
@@ -22,33 +27,30 @@ async function getKnowledgeBase(kbId) {
     }
 }
 
-// 2. Delete Source (FIXED URL)
-async function deleteSource(kbId, sourceId) {
+// 2. Delete Source (CORRECTED URL)
+async function deleteSource(sourceId) {
     try {
         if (!sourceId) return;
 
         console.log(`[Retell] Deleting source: ${sourceId}`);
 
-        // [CRITICAL FIX] Removed kbId from the URL.
-        // Endpoint is: DELETE /delete-knowledge-base-source/{source_id}
+        // [FIXED] The API endpoint is /delete-knowledge-base-source/{source_id}
         await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${sourceId}`, {
-            headers: {
-                'Authorization': `Bearer ${API_KEY}`,
-                'Content-Type': 'application/json'
-            }
+            headers: getCommonHeaders()
         });
+
         console.log(`[Retell] Deleted: ${sourceId}`);
     } catch (error) {
-        // Ignore if already deleted (404) but log others
+        // Ignore 404 (already deleted)
         if (error.response && error.response.status === 404) {
-             console.log(`[Retell] Source ${sourceId} already gone.`);
-             return;
+            console.log(`[Retell] Source already deleted: ${sourceId}`);
+            return;
         }
         console.warn(`[Retell] Delete Warning: ${error.message}`);
     }
 }
 
-// 3. Add Text Source (Multipart - Working)
+// 3. Add Text Source (Multipart/Form-Data)
 async function addTextSource(kbId, menuText) {
     try {
         const now = new Date();
@@ -67,6 +69,7 @@ async function addTextSource(kbId, menuText) {
 
         form.append('knowledge_base_texts', textsPayload);
 
+        // Axios Post with Multipart Headers
         const response = await axios.post(
             `${RETELL_API_URL}/add-knowledge-base-sources/${kbId}`,
             form,
@@ -107,15 +110,13 @@ async function updateMenuInKB(kbId, menuText) {
         if (oldMenus.length > 0) {
             console.log(`[Retell] Found ${oldMenus.length} old menu(s). Cleaning up...`);
 
-            for (const source of oldMenus) {
-                // ID detection
+            // Delete all old menus concurrently
+            await Promise.all(oldMenus.map(source => {
                 const idToDelete = source.knowledge_base_source_id || source.source_id || source.id;
+                return deleteSource(idToDelete);
+            }));
 
-                if (idToDelete) {
-                    await deleteSource(kbId, idToDelete);
-                }
-            }
-            // Wait for deletions to process
+            // Wait a moment for Retell to process
             await new Promise(r => setTimeout(r, 1000));
         }
     }

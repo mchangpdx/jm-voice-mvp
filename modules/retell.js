@@ -49,8 +49,19 @@ async function deleteSource(kbId, sourceId) {
 // 3. Add Text Source (Multipart)
 async function addTextSource(kbId, menuText) {
     try {
+        // [FIX] Use Portland, Oregon Timezone
         const now = new Date();
-        const timeString = `${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()} ${now.getHours()}h${now.getMinutes()}m`;
+        const timeZone = 'America/Los_Angeles';
+
+        const fmt = (options) => now.toLocaleString('en-US', { timeZone, ...options });
+
+        const year = fmt({ year: 'numeric' });
+        const month = fmt({ month: 'numeric' });
+        const day = fmt({ day: 'numeric' });
+        const hour = fmt({ hour: 'numeric', hour12: false });
+        const minute = fmt({ minute: 'numeric' });
+
+        const timeString = `${year}-${month}-${day} ${hour}h${minute}m`;
         const uniqueTitle = `Daily Menu ${timeString}`;
 
         console.log(`[Retell] Uploading: "${uniqueTitle}"`);

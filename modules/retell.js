@@ -1,4 +1,4 @@
-/* modules/retell.js - Robust Cleanup & Multipart Upload */
+/* modules/retell.js - Final Delete Fix */
 const axios = require('axios');
 const FormData = require('form-data');
 require('dotenv').config();
@@ -22,26 +22,33 @@ async function getKnowledgeBase(kbId) {
     }
 }
 
-// 2. Delete Source
+// 2. Delete Source (FIXED URL)
 async function deleteSource(kbId, sourceId) {
     try {
-        if (!sourceId) {
-            console.error("[Retell] Cannot delete source: ID is missing!");
-            return;
-        }
-        console.log(`[Retell] Deleting old source: ${sourceId}`);
-        await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${kbId}/${sourceId}`, {
+        if (!sourceId) return;
+
+        console.log(`[Retell] Deleting source: ${sourceId}`);
+
+        // [CRITICAL FIX] Removed kbId from the URL.
+        // Endpoint is: DELETE /delete-knowledge-base-source/{source_id}
+        await axios.delete(`${RETELL_API_URL}/delete-knowledge-base-source/${sourceId}`, {
             headers: {
                 'Authorization': `Bearer ${API_KEY}`,
                 'Content-Type': 'application/json'
             }
         });
+        console.log(`[Retell] Deleted: ${sourceId}`);
     } catch (error) {
+        // Ignore if already deleted (404) but log others
+        if (error.response && error.response.status === 404) {
+             console.log(`[Retell] Source ${sourceId} already gone.`);
+             return;
+        }
         console.warn(`[Retell] Delete Warning: ${error.message}`);
     }
 }
 
-// 3. Add Text Source (Multipart - PROVEN WORKING)
+// 3. Add Text Source (Multipart - Working)
 async function addTextSource(kbId, menuText) {
     try {
         const now = new Date();
@@ -91,7 +98,7 @@ async function updateMenuInKB(kbId, menuText) {
     // A. Fetch Current Sources
     const kbData = await getKnowledgeBase(kbId);
 
-    // B. Smart Cleanup (Robust ID Check)
+    // B. Smart Cleanup
     if (kbData.knowledge_base_sources) {
         const oldMenus = kbData.knowledge_base_sources.filter(source =>
             source.title && source.title.includes("Daily Menu")
@@ -100,21 +107,16 @@ async function updateMenuInKB(kbId, menuText) {
         if (oldMenus.length > 0) {
             console.log(`[Retell] Found ${oldMenus.length} old menu(s). Cleaning up...`);
 
-            // [DEBUG] Log the first item to see structure if needed
-            // console.log("Sample Source Object:", JSON.stringify(oldMenus[0]));
-
             for (const source of oldMenus) {
-                // [FIX] Try all possible ID fields
+                // ID detection
                 const idToDelete = source.knowledge_base_source_id || source.source_id || source.id;
 
                 if (idToDelete) {
                     await deleteSource(kbId, idToDelete);
-                } else {
-                    console.error("[Retell] Failed to identify ID for source:", JSON.stringify(source));
                 }
             }
-            // Wait for deletions
-            await new Promise(r => setTimeout(r, 1500));
+            // Wait for deletions to process
+            await new Promise(r => setTimeout(r, 1000));
         }
     }
 
